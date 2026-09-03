@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>binjgb — WASM / asm.js fallback demo</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #101014; color: #eee;
+               font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 16px; box-sizing: border-box; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  #status { min-height: 20px; font-size: 13px; color: #9bb; margin-bottom: 8px; text-align: center; }
+  #game {
+    width: 320px; height: 288px;          /* 2x scale of 160x144 */
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    -webkit-tap-highlight-color: transparent;
+    background: #000;
+    border: 2px solid #333;
+    touch-action: none;
+  }
+  #controls { margin-top: 12px; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .btn { min-width: 46px; padding: 10px 12px; border: 1px solid #444; border-radius: 8px;
+         background: #222; color: #fff; font-size: 14px; touch-action: manipulation; }
+  .btn:active { background: #444; }
+  .row { display: flex; gap: 8px; margin-top: 6px; }
+  footer { margin-top: 18px; font-size: 12px; color: #778; }
+  code { background: #222; padding: 0 4px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>binjgb</h1>
+  <div id="status">Loading…</div>
+
+  <canvas id="game" width="160" height="144"></canvas>
+
+  <div id="controls">
+    <div>
+      <div class="row">
+        <button class="btn" data-btn="up">▲</button>
+      </div>
+      <div class="row">
+        <button class="btn" data-btn="left">◀</button>
+        <button class="btn" data-btn="down">▼</button>
+        <button class="btn" data-btn="right">▶</button>
+      </div>
+    </div>
+    <div>
+      <div class="row">
+        <button class="btn" data-btn="B">B</button>
+        <button class="btn" data-btn="A">A</button>
+      </div>
+      <div class="row">
+        <button class="btn" data-btn="select">Select</button>
+        <button class="btn" data-btn="start">Start</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>Engine: <span id="engine">—</span></footer>
+
+  <script src="load-binjgb.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    var SCREEN_W = 160;
+    var SCREEN_H = 144;
+    var TICKS_PER_FRAME = 70224;   // 456 cycles/line * 154 lines
+
+    var canvas = document.getElementById('game');
+    var ctx = canvas.getContext('2d');
+    var imageData = ctx.createImageData(SCREEN_W, SCREEN_H);
+    var statusEl = document.getElementById('status');
+    var engineEl = document.getElementById('engine');
+    var keys = { up: false, down: false, left: false, right: false,
+                 A: false, B: false, start: false, select: false };
+    var module = null;
+
+    function setStatus(t) { statusEl.textContent = t; }
+
+    function loadRom(module, url) {
+      return fetch(url).then(function (r) { return r.arrayBuffer(); })
+        .then(function (buf) {
+          var data = new Uint8Array(buf);
+          var ptr = module._malloc(data.length);
+          module.HEAPU8.set(data, ptr);
+          return { ptr: ptr, size: data.length };
+        });
+    }
+
+    // Wire up buttons (pointer events, also work on iOS Safari).
+    function hookClientId(clientId) {
+      var btn = document.querySelector('[data-btn="' + clientId + '"]');
+      if (!btn) return;
+      var set = function (down) {
+        keys[clientId] = down;
+        var on = keys[clientId];
+        switch (clientId) {
+          case 'up': module['_set_joyp_up'](on ? 1 : 0); break;
+          case 'down': module['_set_joyp_down'](on ? 1 : 0); break;
+          case 'left': module['_set_joyp_left'](on ? 1 : 0); break;
+          case 'right': module['_set_joyp_right'](on ? 1 : 0); break;
+          case 'A': module['_set_joyp_A'](on ? 1 : 0); break;
+          case 'B': module['_set_joyp_B'](on ? 1 : 0); break;
+          case 'start': module['_set_joyp_start'](on ? 1 : 0); break;
+          case 'select': module['_set_joyp_select'](on ? 1 : 0); break;
+        }
+      };
+      btn.addEventListener('pointerdown', function (e) { e.preventDefault(); set(true); });
+      btn.addEventListener('pointerup', function (e) { e.preventDefault(); set(false); });
+      btn.addEventListener('pointerleave', function () { set(false); });
+    }
+
+    function boot(module) {
+      setStatus('Loading ROM…');
+      return loadRom(module, 'game.gbc').then(function (rom) {
+        // emulator_new_simple(rom_ptr, rom_size, audio_frequency, audio_frames, color_curve)
+        var e = module._emulator_new_simple(rom.ptr, rom.size, 44100, 4096, 0);
+
+        // Heap view onto the RGBA frame buffer.
+        var fbPtr = module._get_frame_buffer_ptr(e);
+        var fbSize = module._get_frame_buffer_size(e);
+        var fb = new Uint8Array(module.HEAPU8.buffer, fbPtr, fbSize);
+
+        engineEl.textContent = module.__engine || 'unknown';
+        setStatus('Engine: ' + (module.__engine || 'unknown') + ' — running');
+
+        function frame() {
+          var until = module._emulator_get_ticks_f64(e) + TICKS_PER_FRAME;
+          module._emulator_run_until_f64(e, until);
+          imageData.data.set(fb);
+          ctx.putImageData(imageData, 0, 0);
+          requestAnimationFrame(frame);
+        }
+        frame();
+        return e;
+      });
+    }
+
+    // Keyboard controls (arrows + Z/X/Return/Shift).
+    var keyMap = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+                   z: 'A', x: 'B', ' ': 'select', Enter: 'start' };
+    function setKey(e, down) {
+      var id = keyMap[e.key];
+      if (!id) return;
+      e.preventDefault();
+      if (keys[id] !== down) {
+        keys[id] = down;
+        var on = down;
+        switch (id) {
+          case 'up': module['_set_joyp_up'](on ? 1 : 0); break;
+          case 'down': module['_set_joyp_down'](on ? 1 : 0); break;
+          case 'left': module['_set_joyp_left'](on ? 1 : 0); break;
+          case 'right': module['_set_joyp_right'](on ? 1 : 0); break;
+          case 'A': module['_set_joyp_A'](on ? 1 : 0); break;
+          case 'B': module['_set_joyp_B'](on ? 1 : 0); break;
+          case 'start': module['_set_joyp_start'](on ? 1 : 0); break;
+          case 'select': module['_set_joyp_select'](on ? 1 : 0); break;
+        }
+      }
+    }
+    window.addEventListener('keydown', function (e) { setKey(e, true); });
+    window.addEventListener('keyup', function (e) { setKey(e, false); });
+
+    setStatus('Loading emulator…');
+    loadBinjgb().then(function (box) {
+      var m = box.Module;
+      module = m;
+      ['up', 'down', 'left', 'right', 'A', 'B', 'start', 'select'].forEach(hookClientId);
+      return boot(m);
+    }).catch(function (err) {
+      setStatus('Failed to load: ' + (err && err.message));
+      console.error(err);
+    });
+  })();
+  </script>
+</body>
+</html>
