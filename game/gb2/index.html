@@ -164,7 +164,8 @@
     window.addEventListener('keyup', function (e) { setKey(e, false); });
 
     setStatus('Loading emulator…');
-    loadBinjgb().then(function (m) {
+    loadBinjgb().then(function (box) {
+      var m = box.Module;
       module = m;
       ['up', 'down', 'left', 'right', 'A', 'B', 'start', 'select'].forEach(hookClientId);
       return boot(m);
